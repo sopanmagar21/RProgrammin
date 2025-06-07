@@ -1,0 +1,202 @@
+---
+title: "MovieMetaData_CaseStudy"
+author: "Sopan"
+date: "2025-06-06"
+output:
+  pdf_document: default
+  html_document: default
+---
+```{r}
+# Load required packages
+library(tidyverse)
+library(jsonlite)
+
+# Read the CSV file
+movies_metadata <- read_csv("MovieData/movies_metadata.csv")
+
+# Check the structure of your data
+glimpse(movies_metadata)
+
+# Clean and expand the genres column
+movies_expanded <- movies_metadata %>%
+  # Convert JSON string to proper format (replace single quotes with double quotes)
+  mutate(genres_clean = str_replace_all(genres, "'", '"')) %>%
+  # Parse JSON strings into list columns
+  mutate(genres_list = map(genres_clean, ~ fromJSON(.x)$name)) %>%
+  # Unnest the list column to create multiple rows
+  unnest(genres_list, keep_empty = TRUE) %>%
+  # Rename the new column
+  rename(genre_name = genres_list) %>%
+  # Remove intermediate columns if needed
+  select(-genres_clean)
+
+# View the result
+head(movies_expanded)
+
+# Save the expanded data if needed
+write_csv(movies_expanded, "MovieData/movies_metadata_expanded.csv")
+```
+# Clean the Data and prepare for Analysis
+```{r}
+library(tidyverse)
+library(lubridate) # For timestamp conversion if needed
+```
+
+## Step 1: Load and process ratings data
+```{r}
+ratings <- read_csv("MovieData/ratings_small.csv") %>%
+  # Calculate average rating per movie
+  group_by(movieId) %>%
+  summarize(
+    avg_rating = mean(rating, na.rm = TRUE),
+    rating_count = n()
+  ) %>%
+  ungroup()
+```
+## Step 2: Load and process movie metadata
+
+```{r}
+movies <- read_csv("MovieData/movies_metadata_expanded.csv") %>%
+  # Convert id to numeric to match with ratings (some cleaning might be needed)
+  mutate(
+    movieId = as.numeric(id)  # Assuming 'id' in metadata matches 'movieId' in ratings
+  ) %>%
+  # Handle any rows that didn't convert properly
+  filter(!is.na(movieId))
+```
+
+
+## Step 3: Merge the datasets
+```{r}
+movies_with_ratings <- movies %>%
+  left_join(ratings, by = "movieId") %>%
+  # You might want to arrange by rating or other criteria
+  arrange(desc(avg_rating))
+```
+
+
+
+## Step 4: Optional - Add rating categories
+
+```{r}
+movies_with_ratings <- movies_with_ratings %>%
+  mutate(
+    rating_category = case_when(
+      avg_rating >= 4.5 ~ "Excellent",
+      avg_rating >= 4.0 ~ "Good",
+      avg_rating >= 3.0 ~ "Average",
+      avg_rating >= 2.0 ~ "Below Average",
+      avg_rating >= 0 ~ "Poor",
+      TRUE ~ "No Ratings"
+    )
+  )
+```
+
+## Step 5: View and save results
+
+```{r}
+glimpse(movies_with_ratings)
+```
+
+# Save the merged data
+```{r}
+write_csv(movies_with_ratings, "MovieData/movies_with_ratings.csv")
+```
+
+
+# Top rated movies
+```{r}
+top_movies <- movies_with_ratings %>%
+  filter(rating_count > 50) %>%  # Only movies with sufficient ratings
+  arrange(desc(avg_rating)) %>%
+  select(title, avg_rating, rating_count, genres)
+
+head(top_movies, 10)
+```
+
+# Visualizations: Movie Recommendation 
+
+## Top-Rated Movies (Weighted by Number of Ratings)
+
+```{r}
+movies_with_ratings <- movies_with_ratings %>%
+  mutate(weighted_rating = (avg_rating * rating_count) / (rating_count + 100))  # Bayesian average
+
+top_movies <- movies_with_ratings %>%
+  filter(rating_count > 30) %>%  # Minimum 30 ratings
+  arrange(desc(weighted_rating)) %>%
+  head(20)
+
+ggplot(top_movies, aes(x = reorder(title, weighted_rating), y = weighted_rating, fill = weighted_rating)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Top-Rated Movies (Adjusted for Rating Count)", 
+       x = "Movie Title", 
+       y = "Weighted Average Rating") +
+  scale_fill_gradient(low = "#ff9999", high = "#66b3ff") +
+  theme_minimal()
+```
+## Most Popular Genres by Average Rating
+```{r}
+genre_ratings <- movies_with_ratings %>%
+  separate_rows(genres, sep = "\\}, \\{") %>%  # Split genres
+  mutate(genre = str_extract(genres, "'name': '[A-Za-z]+")) %>%
+  mutate(genre = gsub("'name': '", "", genre)) %>%
+  filter(!is.na(genre)) %>%
+  group_by(genre) %>%
+  summarise(
+    avg_rating = mean(avg_rating, na.rm = TRUE),
+    movie_count = n()
+  ) %>%
+  filter(movie_count > 50)  # Only genres with sufficient data
+
+ggplot(genre_ratings, aes(x = reorder(genre, avg_rating), y = avg_rating, fill = avg_rating)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = "Highest-Rated Movie Genres", 
+       x = "Genre", 
+       y = "Average Rating") +
+  scale_fill_gradient(low = "#ffcc99", high = "#ff6666") +
+  theme_minimal()
+```
+## Rating Distribution by Genre
+```{r}
+movies_with_genres <- movies_with_ratings %>%
+  separate_rows(genres, sep = "\\}, \\{") %>%
+  mutate(genre = str_extract(genres, "'name': '[A-Za-z]+")) %>%
+  mutate(genre = gsub("'name': '", "", genre)) %>%
+  filter(!is.na(genre) & !is.na(avg_rating))
+
+ggplot(movies_with_genres, aes(x = genre, y = avg_rating, fill = genre)) +
+  geom_boxplot() +
+  coord_flip() +
+  labs(title = "Rating Distribution by Genre", 
+       x = "Genre", 
+       y = "Average Rating") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+## Movie Recommendations Based on User Preferences
+```{r}
+# Example: User likes "The Dark Knight" (assuming movieId = 155)
+target_movie <- "The Dark Knight"
+
+# Find similar movies by genre and rating
+similar_movies <- movies_with_ratings %>%
+  filter(str_detect(genres, "Action") &  # Same genre
+         avg_rating >= 4.0 &             # Highly rated
+         title != target_movie) %>%      # Exclude the target
+  arrange(desc(avg_rating)) %>%
+  head(10)
+
+ggplot(similar_movies, aes(x = reorder(title, avg_rating), y = avg_rating, fill = avg_rating)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(title = paste("Movies Similar to", target_movie), 
+       x = "Movie Title", 
+       y = "Average Rating") +
+  scale_fill_gradient(low = "#99cc99", high = "#006600") +
+  theme_minimal()
+```
+
+
